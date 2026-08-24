@@ -50,7 +50,13 @@ jobs:
                     env:
                       - name: TRIVY_CACHE_DIR
                         value: /tmp/trivy
-                    args: ["image", "--exit-code", "1", "--severity", "CRITICAL", "--ignore-unfixed", "$IMG"]
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        set -eu
+                        export TRIVY_USERNAME=unused
+                        export TRIVY_PASSWORD=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                        trivy image --insecure --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMG"
                     volumeMounts:
                       - name: cache
                         mountPath: /tmp/trivy
