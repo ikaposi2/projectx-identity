@@ -47,7 +47,16 @@ jobs:
                 containers:
                   - name: trivy
                     image: docker.io/aquasec/trivy:0.58.1
+                    env:
+                      - name: TRIVY_CACHE_DIR
+                        value: /tmp/trivy
                     args: ["image", "--exit-code", "1", "--severity", "CRITICAL", "--ignore-unfixed", "$IMG"]
+                    volumeMounts:
+                      - name: cache
+                        mountPath: /tmp/trivy
+                volumes:
+                  - name: cache
+                    emptyDir: {}
           EOF
           for i in $(seq 1 36); do
             SUCC=$(oc -n "$NAMESPACE" get job "$JOB" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)
