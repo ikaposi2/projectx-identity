@@ -1,8 +1,9 @@
 name: Build and scan (OKD Git BuildConfig)
 
+# Normal path: OKD BuildConfig GitHub webhook on push to main.
+# Manual backup only — requires repo secret OKD_KUBECONFIG.
+
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
