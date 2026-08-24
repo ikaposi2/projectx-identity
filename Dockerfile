@@ -3,6 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
+# Dependency layer kept stable for OKD Buildah layer reuse across Git builds.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
