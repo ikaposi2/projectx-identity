@@ -8,6 +8,7 @@ from app.api.schemas import (
     LoginRequest,
     RegisterRequest,
     TokenResponse,
+    UserListItem,
     UserResponse,
 )
 from app.auth.provider import get_auth_provider
@@ -115,3 +116,26 @@ async def me(user: User = Depends(current_user)) -> UserResponse:
         locale=user.locale,
         tenant_id=user.tenant_id,
     )
+
+
+@router.get("/users", response_model=list[UserListItem])
+async def list_users(
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[UserListItem]:
+    """Tenant directory for managers (resolve partner names in finance / admin)."""
+    if user.role not in {"partner", "manager", "admin"}:
+        raise HTTPException(status_code=403, detail="not_manager")
+    rows = await db.scalars(
+        select(User).where(User.tenant_id == user.tenant_id).order_by(User.full_name)
+    )
+    return [
+        UserListItem(
+            id=row.id,
+            email=row.email,
+            full_name=row.full_name,
+            role=row.role,
+            is_active=row.is_active,
+        )
+        for row in rows
+    ]

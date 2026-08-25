@@ -27,6 +27,14 @@ class UserResponse(BaseModel):
     tenant_id: str
 
 
+class UserListItem(BaseModel):
+    id: str
+    email: EmailStr
+    full_name: str
+    role: str
+    is_active: bool
+
+
 class BrandResponse(BaseModel):
     display_name: str
     default_locale: str
