@@ -15,6 +15,7 @@ from app.auth.provider import get_auth_provider
 from app.core.config import get_settings
 from app.db.models import Tenant, User
 from app.db.session import get_db
+from app.observability import audit
 
 router = APIRouter(tags=["identity"])
 security = HTTPBearer(auto_error=False)
@@ -40,6 +41,14 @@ async def brand() -> BrandResponse:
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
     existing = await db.scalar(select(User).where(User.email == body.email.lower()))
     if existing:
+        audit(
+            "user-create",
+            outcome="failure",
+            category=["iam", "authentication"],
+            event_type=["user", "creation"],
+            message="register failed: email taken",
+            **{"user.email": body.email.lower()},
+        )
         raise HTTPException(status_code=409, detail="email_taken")
 
     tenant = Tenant(name=body.tenant_name)
@@ -58,6 +67,22 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
     await db.commit()
     await db.refresh(user)
 
+    audit(
+        "user-create",
+        outcome="success",
+        category=["iam", "authentication"],
+        event_type=["user", "creation"],
+        message="user registered",
+        **{
+            "user.id": user.id,
+            "user.email": user.email,
+            "user.name": user.full_name,
+            "user.roles": [user.role],
+            "organization.id": user.tenant_id,
+            "organization.name": body.tenant_name,
+        },
+    )
+
     token = auth.create_access_token(
         user.id,
         {
@@ -74,9 +99,44 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
     user = await db.scalar(select(User).where(User.email == body.email.lower()))
     if not user or not auth.verify_password(body.password, user.hashed_password):
+        audit(
+            "user-login",
+            outcome="failure",
+            category=["authentication"],
+            event_type=["start"],
+            message="login failed: invalid credentials",
+            **{"user.email": body.email.lower()},
+        )
         raise HTTPException(status_code=401, detail="invalid_credentials")
     if not user.is_active:
+        audit(
+            "user-login",
+            outcome="failure",
+            category=["authentication"],
+            event_type=["start"],
+            message="login failed: user inactive",
+            **{
+                "user.id": user.id,
+                "user.email": user.email,
+                "organization.id": user.tenant_id,
+            },
+        )
         raise HTTPException(status_code=403, detail="user_inactive")
+
+    audit(
+        "user-login",
+        outcome="success",
+        category=["authentication"],
+        event_type=["start"],
+        message="login succeeded",
+        **{
+            "user.id": user.id,
+            "user.email": user.email,
+            "user.name": user.full_name,
+            "user.roles": [user.role],
+            "organization.id": user.tenant_id,
+        },
+    )
 
     token = auth.create_access_token(
         user.id,
