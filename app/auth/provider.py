@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
+from uuid import uuid4
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -27,13 +28,17 @@ class LocalAuthProvider:
         return pwd_context.verify(plain, hashed)
 
     def create_access_token(self, subject: str, claims: dict) -> str:
+        # jti = session.id for audit stitching across UI + API.
+        jti = str(claims.get("jti") or uuid4())
         payload = {
             "sub": subject,
+            "jti": jti,
             "iat": datetime.now(timezone.utc),
             "exp": datetime.now(timezone.utc)
             + timedelta(minutes=settings.access_token_expire_minutes),
-            **claims,
+            **{k: v for k, v in claims.items() if k != "jti"},
         }
+        payload["jti"] = jti
         return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
     def decode_token(self, token: str) -> dict:

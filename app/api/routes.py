@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
@@ -16,11 +18,27 @@ from app.core.config import get_settings
 from app.db.models import Tenant, User
 from app.db.session import get_db
 from app.observability import audit
+from app.observability.audit import set_audit_session_id
 
 router = APIRouter(tags=["identity"])
 security = HTTPBearer(auto_error=False)
 auth = get_auth_provider()
 settings = get_settings()
+
+
+def _issue_token(user: User, *, session_id: str | None = None) -> tuple[str, str]:
+    jti = session_id or str(uuid4())
+    token = auth.create_access_token(
+        user.id,
+        {
+            "jti": jti,
+            "email": user.email,
+            "tenant_id": user.tenant_id,
+            "role": user.role,
+            "locale": user.locale,
+        },
+    )
+    return token, jti
 
 
 @router.get("/health")
@@ -67,6 +85,8 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
     await db.commit()
     await db.refresh(user)
 
+    token, session_id = _issue_token(user)
+    set_audit_session_id(session_id)
     audit(
         "user-create",
         outcome="success",
@@ -80,16 +100,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
             "user.roles": [user.role],
             "organization.id": user.tenant_id,
             "organization.name": body.tenant_name,
-        },
-    )
-
-    token = auth.create_access_token(
-        user.id,
-        {
-            "email": user.email,
-            "tenant_id": user.tenant_id,
-            "role": user.role,
-            "locale": user.locale,
+            "session.id": session_id,
         },
     )
     return TokenResponse(access_token=token)
@@ -123,6 +134,8 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> Token
         )
         raise HTTPException(status_code=403, detail="user_inactive")
 
+    session_id = str(uuid4())
+    set_audit_session_id(session_id)
     audit(
         "user-login",
         outcome="success",
@@ -135,18 +148,11 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> Token
             "user.name": user.full_name,
             "user.roles": [user.role],
             "organization.id": user.tenant_id,
+            "session.id": session_id,
         },
     )
 
-    token = auth.create_access_token(
-        user.id,
-        {
-            "email": user.email,
-            "tenant_id": user.tenant_id,
-            "role": user.role,
-            "locale": user.locale,
-        },
-    )
+    token, _ = _issue_token(user, session_id=session_id)
     return TokenResponse(access_token=token)
 
 
@@ -160,6 +166,9 @@ async def current_user(
         payload = auth.decode_token(creds.credentials)
     except ValueError:
         raise HTTPException(status_code=401, detail="invalid_token") from None
+    jti = payload.get("jti")
+    if jti:
+        set_audit_session_id(str(jti))
     user = await db.get(User, payload.get("sub"))
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="invalid_token")
