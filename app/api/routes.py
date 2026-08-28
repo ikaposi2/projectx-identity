@@ -1,4 +1,5 @@
 import secrets
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -47,6 +48,24 @@ def _issue_token(user: User, *, session_id: str | None = None) -> tuple[str, str
 
 def _oidc_enabled() -> bool:
     return settings.auth_mode.lower().strip() == "oidc"
+
+
+def _oidc_audit_fields(identity: dict[str, Any] | None = None, **extra: Any) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "auth.method": "oidc",
+        "identity.provider": "keycloak",
+    }
+    if identity:
+        if identity.get("sub"):
+            fields["user.oidc.sub"] = identity["sub"]
+        if identity.get("email"):
+            fields["user.email"] = identity["email"]
+        if identity.get("groups"):
+            fields["identity.groups"] = identity["groups"]
+        if identity.get("role"):
+            fields["user.roles"] = [identity["role"]]
+    fields.update(extra)
+    return fields
 
 
 @router.get("/health")
@@ -213,6 +232,7 @@ async def oidc_callback(
             category=["authentication"],
             event_type=["start"],
             message=f"oidc login failed: {exc}",
+            **_oidc_audit_fields(),
         )
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except Exception as exc:
@@ -222,6 +242,7 @@ async def oidc_callback(
             category=["authentication"],
             event_type=["start"],
             message="oidc login failed: exchange error",
+            **_oidc_audit_fields(),
         )
         raise HTTPException(status_code=401, detail="oidc_exchange_failed") from exc
 
@@ -260,7 +281,7 @@ async def oidc_callback(
             category=["authentication"],
             event_type=["start"],
             message="oidc login failed: user inactive",
-            **{"user.email": email, "user.id": user.id},
+            **_oidc_audit_fields(identity, **{"user.id": user.id}),
         )
         raise HTTPException(status_code=403, detail="user_inactive")
 
@@ -275,14 +296,15 @@ async def oidc_callback(
         category=["authentication", "iam"] if created else ["authentication"],
         event_type=["user", "creation"] if created else ["start"],
         message="oidc user provisioned" if created else "oidc login succeeded",
-        **{
-            "user.id": user.id,
-            "user.email": user.email,
-            "user.name": user.full_name,
-            "user.roles": [user.role],
-            "organization.id": user.tenant_id,
-            "session.id": session_id,
-        },
+        **_oidc_audit_fields(
+            identity,
+            **{
+                "user.id": user.id,
+                "user.name": user.full_name,
+                "organization.id": user.tenant_id,
+                "session.id": session_id,
+            },
+        ),
     )
     token, _ = _issue_token(user, session_id=session_id)
     return TokenResponse(access_token=token)

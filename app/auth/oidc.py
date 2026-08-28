@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 from jose import JWTError, jwt
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from app.core.config import get_settings
 
@@ -15,6 +17,7 @@ _discovery_at = 0.0
 _jwks: dict[str, Any] | None = None
 _jwks_at = 0.0
 _CACHE_TTL = 600.0
+_tracer = trace.get_tracer(__name__)
 
 GROUP_ROLE_PRIORITY = (
     ("platform-admins", "admin"),
@@ -43,11 +46,21 @@ async def _get_discovery() -> dict[str, Any]:
         return _discovery
     issuer = get_settings().oidc_issuer.rstrip("/")
     url = f"{issuer}/.well-known/openid-configuration"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        _discovery = resp.json()
-        _discovery_at = now
+    with _tracer.start_as_current_span(
+        "oidc.discovery",
+        kind=SpanKind.CLIENT,
+        attributes={
+            "auth.method": "oidc",
+            "identity.provider": "keycloak",
+            "peer.service": "keycloak",
+            "url.full": url,
+        },
+    ):
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            _discovery = resp.json()
+            _discovery_at = now
     return _discovery
 
 
@@ -57,11 +70,22 @@ async def _get_jwks() -> dict[str, Any]:
     if _jwks and now - _jwks_at < _CACHE_TTL:
         return _jwks
     discovery = await _get_discovery()
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(discovery["jwks_uri"])
-        resp.raise_for_status()
-        _jwks = resp.json()
-        _jwks_at = now
+    jwks_uri = discovery["jwks_uri"]
+    with _tracer.start_as_current_span(
+        "oidc.jwks",
+        kind=SpanKind.CLIENT,
+        attributes={
+            "auth.method": "oidc",
+            "identity.provider": "keycloak",
+            "peer.service": "keycloak",
+            "url.full": jwks_uri,
+        },
+    ):
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(jwks_uri)
+            resp.raise_for_status()
+            _jwks = resp.json()
+            _jwks_at = now
     return _jwks
 
 
@@ -114,52 +138,99 @@ async def exchange_code(*, code: str, code_verifier: str, redirect_uri: str) -> 
     if redirect_uri not in allowed_redirect_uris():
         raise ValueError("invalid_redirect_uri")
     settings = get_settings()
-    discovery = await _get_discovery()
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        token_resp = await client.post(
-            discovery["token_endpoint"],
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "client_id": settings.oidc_client_id,
-                "code_verifier": code_verifier,
-            },
-            headers={"Accept": "application/json"},
-        )
-        if token_resp.status_code >= 400:
-            raise ValueError("oidc_exchange_failed")
-        tokens = token_resp.json()
-        id_token = tokens.get("id_token")
-        if not id_token:
-            raise ValueError("missing_id_token")
-        jwks = await _get_jwks()
-        claims = _decode_id_token(id_token, jwks)
-        extra: dict[str, Any] = {}
-        access = tokens.get("access_token")
-        if access:
-            extra = jwt.get_unverified_claims(access)
-        userinfo: dict[str, Any] = {}
-        userinfo_url = discovery.get("userinfo_endpoint")
-        if userinfo_url and access:
-            ui = await client.get(
-                userinfo_url,
-                headers={"Authorization": f"Bearer {access}"},
+    with _tracer.start_as_current_span(
+        "oidc.exchange_code",
+        kind=SpanKind.CLIENT,
+        attributes={
+            "auth.method": "oidc",
+            "identity.provider": "keycloak",
+            "peer.service": "keycloak",
+            "oidc.client_id": settings.oidc_client_id,
+        },
+    ) as span:
+        try:
+            discovery = await _get_discovery()
+            token_endpoint = discovery["token_endpoint"]
+            span.set_attribute("url.full", token_endpoint)
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                with _tracer.start_as_current_span(
+                    "oidc.token_exchange",
+                    kind=SpanKind.CLIENT,
+                    attributes={
+                        "auth.method": "oidc",
+                        "identity.provider": "keycloak",
+                        "peer.service": "keycloak",
+                        "url.full": token_endpoint,
+                    },
+                ):
+                    token_resp = await client.post(
+                        token_endpoint,
+                        data={
+                            "grant_type": "authorization_code",
+                            "code": code,
+                            "redirect_uri": redirect_uri,
+                            "client_id": settings.oidc_client_id,
+                            "code_verifier": code_verifier,
+                        },
+                        headers={"Accept": "application/json"},
+                    )
+                if token_resp.status_code >= 400:
+                    span.set_status(Status(StatusCode.ERROR, "token_exchange_failed"))
+                    raise ValueError("oidc_exchange_failed")
+                tokens = token_resp.json()
+                id_token = tokens.get("id_token")
+                if not id_token:
+                    span.set_status(Status(StatusCode.ERROR, "missing_id_token"))
+                    raise ValueError("missing_id_token")
+                jwks = await _get_jwks()
+                claims = _decode_id_token(id_token, jwks)
+                extra: dict[str, Any] = {}
+                access = tokens.get("access_token")
+                if access:
+                    extra = jwt.get_unverified_claims(access)
+                userinfo: dict[str, Any] = {}
+                userinfo_url = discovery.get("userinfo_endpoint")
+                if userinfo_url and access:
+                    with _tracer.start_as_current_span(
+                        "oidc.userinfo",
+                        kind=SpanKind.CLIENT,
+                        attributes={
+                            "auth.method": "oidc",
+                            "identity.provider": "keycloak",
+                            "peer.service": "keycloak",
+                            "url.full": userinfo_url,
+                        },
+                    ):
+                        ui = await client.get(
+                            userinfo_url,
+                            headers={"Authorization": f"Bearer {access}"},
+                        )
+                    if ui.status_code == 200:
+                        userinfo = ui.json()
+            groups = _groups_from_claims(claims, extra, userinfo)
+            email = (claims.get("email") or userinfo.get("email") or "").strip().lower()
+            if not email:
+                span.set_status(Status(StatusCode.ERROR, "email_required"))
+                raise ValueError("email_required")
+            name = (
+                (claims.get("name") or userinfo.get("name") or "").strip()
+                or (claims.get("preferred_username") or email.split("@")[0])
             )
-            if ui.status_code == 200:
-                userinfo = ui.json()
-    groups = _groups_from_claims(claims, extra, userinfo)
-    email = (claims.get("email") or userinfo.get("email") or "").strip().lower()
-    if not email:
-        raise ValueError("email_required")
-    name = (
-        (claims.get("name") or userinfo.get("name") or "").strip()
-        or (claims.get("preferred_username") or email.split("@")[0])
-    )
-    return {
-        "sub": str(claims.get("sub") or ""),
-        "email": email,
-        "full_name": str(name)[:200],
-        "groups": groups,
-        "role": map_groups_to_role(groups),
-    }
+            role = map_groups_to_role(groups)
+            span.set_attribute("user.email", email)
+            span.set_attribute("user.oidc.sub", str(claims.get("sub") or ""))
+            span.set_attribute("identity.groups", groups)
+            span.set_attribute("user.roles", [role])
+            return {
+                "sub": str(claims.get("sub") or ""),
+                "email": email,
+                "full_name": str(name)[:200],
+                "groups": groups,
+                "role": role,
+            }
+        except ValueError:
+            raise
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            raise
