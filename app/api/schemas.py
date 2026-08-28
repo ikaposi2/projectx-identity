@@ -13,6 +13,17 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class OidcCallbackRequest(BaseModel):
+    code: str = Field(min_length=1)
+    code_verifier: str = Field(min_length=43, max_length=128)
+    redirect_uri: str = Field(min_length=1, max_length=500)
+
+
+class AuthConfigResponse(BaseModel):
+    auth_mode: str
+    oidc: dict | None = None
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

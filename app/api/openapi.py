@@ -14,7 +14,14 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "identity", "description": "Health, brand, authentication, users"},
 ]
 
-PUBLIC_PATHS = {"/health", "/brand", "/auth/login", "/auth/register"}
+PUBLIC_PATHS = {
+    "/health",
+    "/brand",
+    "/auth/login",
+    "/auth/register",
+    "/auth/config",
+    "/auth/oidc/callback",
+}
 
 
 def configure_openapi(app: FastAPI) -> None:

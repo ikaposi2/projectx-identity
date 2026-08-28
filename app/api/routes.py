@@ -1,3 +1,4 @@
+import secrets
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -6,13 +7,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
+    AuthConfigResponse,
     BrandResponse,
     LoginRequest,
+    OidcCallbackRequest,
     RegisterRequest,
     TokenResponse,
     UserListItem,
     UserResponse,
 )
+from app.auth import oidc as oidc_auth
 from app.auth.provider import get_auth_provider
 from app.core.config import get_settings
 from app.db.models import Tenant, User
@@ -41,6 +45,10 @@ def _issue_token(user: User, *, session_id: str | None = None) -> tuple[str, str
     return token, jti
 
 
+def _oidc_enabled() -> bool:
+    return settings.auth_mode.lower().strip() == "oidc"
+
+
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.service_name}
@@ -55,8 +63,21 @@ async def brand() -> BrandResponse:
     )
 
 
+@router.get("/auth/config", response_model=AuthConfigResponse)
+async def auth_config() -> AuthConfigResponse:
+    try:
+        cfg = await oidc_auth.public_auth_config()
+    except Exception as exc:
+        if _oidc_enabled():
+            raise HTTPException(status_code=503, detail="oidc_unavailable") from exc
+        return AuthConfigResponse(auth_mode=settings.auth_mode.lower().strip())
+    return AuthConfigResponse(auth_mode=cfg["auth_mode"], oidc=cfg.get("oidc"))
+
+
 @router.post("/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
+    if _oidc_enabled():
+        raise HTTPException(status_code=403, detail="registration_disabled")
     existing = await db.scalar(select(User).where(User.email == body.email.lower()))
     if existing:
         audit(
@@ -108,6 +129,8 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
 
 @router.post("/auth/login", response_model=TokenResponse)
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
+    if _oidc_enabled():
+        raise HTTPException(status_code=403, detail="use_oidc")
     user = await db.scalar(select(User).where(User.email == body.email.lower()))
     if not user or not auth.verify_password(body.password, user.hashed_password):
         audit(
@@ -152,6 +175,115 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> Token
         },
     )
 
+    token, _ = _issue_token(user, session_id=session_id)
+    return TokenResponse(access_token=token)
+
+
+async def _ensure_tenant(db: AsyncSession) -> Tenant:
+    tenant = await db.scalar(
+        select(Tenant).where(Tenant.name == settings.oidc_default_tenant)
+    )
+    if tenant:
+        return tenant
+    tenant = await db.scalar(select(Tenant).order_by(Tenant.created_at))
+    if tenant:
+        return tenant
+    tenant = Tenant(name=settings.oidc_default_tenant)
+    db.add(tenant)
+    await db.flush()
+    return tenant
+
+
+@router.post("/auth/oidc/callback", response_model=TokenResponse)
+async def oidc_callback(
+    body: OidcCallbackRequest, db: AsyncSession = Depends(get_db)
+) -> TokenResponse:
+    if not _oidc_enabled():
+        raise HTTPException(status_code=403, detail="oidc_disabled")
+    try:
+        identity = await oidc_auth.exchange_code(
+            code=body.code,
+            code_verifier=body.code_verifier,
+            redirect_uri=body.redirect_uri,
+        )
+    except ValueError as exc:
+        audit(
+            "user-login",
+            outcome="failure",
+            category=["authentication"],
+            event_type=["start"],
+            message=f"oidc login failed: {exc}",
+        )
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except Exception as exc:
+        audit(
+            "user-login",
+            outcome="failure",
+            category=["authentication"],
+            event_type=["start"],
+            message="oidc login failed: exchange error",
+        )
+        raise HTTPException(status_code=401, detail="oidc_exchange_failed") from exc
+
+    sub = identity["sub"]
+    email = identity["email"]
+    user = None
+    if sub:
+        user = await db.scalar(select(User).where(User.oidc_sub == sub))
+    if user is None:
+        user = await db.scalar(select(User).where(User.email == email))
+    created = False
+    if user is None:
+        tenant = await _ensure_tenant(db)
+        user = User(
+            tenant_id=tenant.id,
+            email=email,
+            full_name=identity["full_name"],
+            hashed_password=auth.hash_password(secrets.token_urlsafe(32)),
+            oidc_sub=sub or None,
+            role=identity["role"],
+            locale=settings.default_locale,
+        )
+        db.add(user)
+        created = True
+    else:
+        if sub and not user.oidc_sub:
+            user.oidc_sub = sub
+        user.full_name = identity["full_name"] or user.full_name
+        user.role = identity["role"]
+        if user.email != email:
+            user.email = email
+    if not user.is_active:
+        audit(
+            "user-login",
+            outcome="failure",
+            category=["authentication"],
+            event_type=["start"],
+            message="oidc login failed: user inactive",
+            **{"user.email": email, "user.id": user.id},
+        )
+        raise HTTPException(status_code=403, detail="user_inactive")
+
+    await db.commit()
+    await db.refresh(user)
+
+    session_id = str(uuid4())
+    set_audit_session_id(session_id)
+    audit(
+        "user-create" if created else "user-login",
+        outcome="success",
+        category=["authentication", "iam"] if created else ["authentication"],
+        event_type=["user", "creation"] if created else ["start"],
+        message="oidc user provisioned" if created else "oidc login succeeded",
+        **{
+            "user.id": user.id,
+            "user.email": user.email,
+            "user.name": user.full_name,
+            "user.roles": [user.role],
+            "organization.id": user.tenant_id,
+            "session.id": session_id,
+        },
+    )
     token, _ = _issue_token(user, session_id=session_id)
     return TokenResponse(access_token=token)
 

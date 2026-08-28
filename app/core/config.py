@@ -19,6 +19,17 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-only-change-me"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
+    auth_mode: str = Field(default="local", validation_alias="AUTH_MODE")
+    oidc_issuer: str = Field(
+        default="https://auth.apps.cloud.kaposi.net/realms/kaposi",
+        validation_alias="OIDC_ISSUER",
+    )
+    oidc_client_id: str = Field(default="projectx-web", validation_alias="OIDC_CLIENT_ID")
+    oidc_redirect_uris: str = Field(
+        default="https://projectx.apps.cloud.kaposi.net/auth/callback,http://localhost:5173/auth/callback",
+        validation_alias="OIDC_REDIRECT_URIS",
+    )
+    oidc_default_tenant: str = Field(default="Kaposi", validation_alias="OIDC_DEFAULT_TENANT")
     otel_exporter_otlp_endpoint: str | None = None
     brand_display_name: str = "Platform"
     default_locale: str = "nl"

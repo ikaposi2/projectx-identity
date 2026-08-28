@@ -35,6 +35,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
     full_name: Mapped[str] = mapped_column(String(200), nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    oidc_sub: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True, index=True)
     role: Mapped[str] = mapped_column(String(50), default="partner")
     locale: Mapped[str] = mapped_column(String(8), default="nl")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

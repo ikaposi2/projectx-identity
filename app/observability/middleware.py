@@ -49,7 +49,14 @@ def _principal_from_request(
 
 class RequestAuditMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path in {"/health", "/docs", "/openapi.json", "/redoc", "/brand"}:
+        if request.url.path in {
+            "/health",
+            "/docs",
+            "/openapi.json",
+            "/redoc",
+            "/brand",
+            "/auth/config",
+        }:
             return await call_next(request)
 
         user_id, email, tenant_id, session_id = _principal_from_request(request)
