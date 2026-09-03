@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     )
     oidc_default_tenant: str = Field(default="Kaposi", validation_alias="OIDC_DEFAULT_TENANT")
     otel_exporter_otlp_endpoint: str | None = None
-    brand_display_name: str = "Platform"
+    brand_display_name: str = Field(default="Platform", validation_alias="BRAND_DISPLAY_NAME")
     default_locale: str = "nl"
     cors_origins: str = (
         "http://localhost:5173,http://127.0.0.1:5173,"

@@ -205,14 +205,42 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> Token
 
 
 async def _ensure_tenant(db: AsyncSession) -> Tenant:
+    """Resolve the ops tenant for portal registration.
+
+    Prefer a named match that already has staff users so portal customers land
+    in the same tenant as projectX-web (avoids empty duplicate 'Platform' tenants).
+    """
+    staff_roles = ("admin", "manager", "partner")
+    for name in (settings.oidc_default_tenant, settings.brand_display_name):
+        tenant = await db.scalar(
+            select(Tenant)
+            .join(User, User.tenant_id == Tenant.id)
+            .where(Tenant.name == name, User.role.in_(staff_roles))
+            .order_by(Tenant.created_at.desc())
+            .limit(1)
+        )
+        if tenant:
+            return tenant
+        tenant = await db.scalar(
+            select(Tenant).where(Tenant.name == name).order_by(Tenant.created_at.desc())
+        )
+        if tenant:
+            return tenant
+
     tenant = await db.scalar(
-        select(Tenant).where(Tenant.name == settings.oidc_default_tenant)
+        select(Tenant)
+        .join(User, User.tenant_id == Tenant.id)
+        .where(User.role.in_(staff_roles))
+        .order_by(Tenant.created_at.desc())
+        .limit(1)
     )
     if tenant:
         return tenant
-    tenant = await db.scalar(select(Tenant).order_by(Tenant.created_at))
+
+    tenant = await db.scalar(select(Tenant).order_by(Tenant.created_at.desc()))
     if tenant:
         return tenant
+
     tenant = Tenant(name=settings.oidc_default_tenant)
     db.add(tenant)
     await db.flush()

@@ -33,8 +33,20 @@ async def create_portal_customer(*, access_token: str, payload: dict[str, Any]) 
         detail = "customer_create_failed"
         try:
             body = res.json()
-            if isinstance(body, dict) and body.get("detail"):
-                detail = str(body["detail"])
+            raw = body.get("detail") if isinstance(body, dict) else None
+            if isinstance(raw, str) and raw:
+                detail = raw
+            elif isinstance(raw, list) and raw:
+                first = raw[0] if isinstance(raw[0], dict) else {}
+                msg = str(first.get("msg") or first)
+                loc = first.get("loc")
+                if isinstance(loc, list):
+                    path = ".".join(str(x) for x in loc if x != "body")
+                    detail = f"{path}: {msg}" if path else msg
+                else:
+                    detail = msg
+            elif raw is not None:
+                detail = str(raw)
         except Exception:
             pass
         raise CustomerClientError(detail, status_code=res.status_code)
