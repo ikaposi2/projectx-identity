@@ -19,6 +19,8 @@ PUBLIC_PATHS = {
     "/brand",
     "/auth/login",
     "/auth/register",
+    "/auth/customer/login",
+    "/auth/customer/register",
     "/auth/config",
     "/auth/oidc/callback",
 }

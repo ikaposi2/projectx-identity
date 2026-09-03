@@ -20,8 +20,19 @@ uvicorn app.main:app --reload --port 8001
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `DATABASE_URL` | sqlite for local | Postgres URL in cluster |
-| `AUTH_MODE` | `local` | `local` or `oidc` |
+| `AUTH_MODE` | `local` | `local` or `oidc` (staff); customer portal login is always local |
 | `OIDC_ISSUER` | Keycloak kaposi realm | used when `AUTH_MODE=oidc` |
 | `OIDC_CLIENT_ID` | `projectx-web` | public PKCE client |
+| `CUSTOMER_SERVICE_URL` | `http://localhost:8005` | Portal register creates Customer |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | | collector URL |
 | `SERVICE_NAME` | `projectX-identity` | OTel resource |
+
+## Customer portal auth
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/auth/customer/register` | Creates Customer + User(`role=customer`); works with staff OIDC |
+| POST | `/auth/customer/login` | Local email/password; JWT includes `customer_id` |
+| GET | `/me` | Includes `customer_id` when present |
+
+See [ADR 0021](../projectX-docs/docs/adr/0021-customer-portal-auth.md).

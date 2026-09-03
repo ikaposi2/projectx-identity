@@ -37,6 +37,7 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     oidc_sub: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True, index=True)
     role: Mapped[str] = mapped_column(String(50), default="partner")
+    customer_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     locale: Mapped[str] = mapped_column(String(8), default="nl")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

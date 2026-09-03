@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.schemas import (
     AuthConfigResponse,
     BrandResponse,
+    CustomerRegisterRequest,
     LoginRequest,
     OidcCallbackRequest,
     RegisterRequest,
@@ -19,30 +20,33 @@ from app.api.schemas import (
 )
 from app.auth import oidc as oidc_auth
 from app.auth.provider import get_auth_provider
+from app.auth.service_token import mint_service_access_token
 from app.core.config import get_settings
 from app.db.models import Tenant, User
 from app.db.session import get_db
 from app.observability import audit
 from app.observability.audit import set_audit_session_id
+from app.services.customer_client import CustomerClientError, create_portal_customer
 
 router = APIRouter(tags=["identity"])
 security = HTTPBearer(auto_error=False)
 auth = get_auth_provider()
 settings = get_settings()
+STAFF_ROLES = {"partner", "manager", "admin"}
 
 
 def _issue_token(user: User, *, session_id: str | None = None) -> tuple[str, str]:
     jti = session_id or str(uuid4())
-    token = auth.create_access_token(
-        user.id,
-        {
-            "jti": jti,
-            "email": user.email,
-            "tenant_id": user.tenant_id,
-            "role": user.role,
-            "locale": user.locale,
-        },
-    )
+    claims: dict[str, Any] = {
+        "jti": jti,
+        "email": user.email,
+        "tenant_id": user.tenant_id,
+        "role": user.role,
+        "locale": user.locale,
+    }
+    if user.customer_id:
+        claims["customer_id"] = user.customer_id
+    token = auth.create_access_token(user.id, claims)
     return token, jti
 
 
@@ -161,6 +165,8 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> Token
             **{"user.email": body.email.lower()},
         )
         raise HTTPException(status_code=401, detail="invalid_credentials")
+    if user.role == "customer":
+        raise HTTPException(status_code=403, detail="use_customer_login")
     if not user.is_active:
         audit(
             "user-login",
@@ -213,6 +219,146 @@ async def _ensure_tenant(db: AsyncSession) -> Tenant:
     return tenant
 
 
+@router.post(
+    "/auth/customer/register",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def customer_register(
+    body: CustomerRegisterRequest,
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    """Public customer portal registration (local email/password; works alongside staff OIDC)."""
+    email = body.email.lower()
+
+    existing = await db.scalar(select(User).where(User.email == email))
+    if existing:
+        audit(
+            "user-create",
+            outcome="failure",
+            category=["iam", "authentication"],
+            event_type=["user", "creation"],
+            message="customer register failed: email taken",
+            **{"user.email": email},
+        )
+        raise HTTPException(status_code=409, detail="email_taken")
+
+    tenant = await _ensure_tenant(db)
+    service_token = mint_service_access_token(
+        user_id="identity-portal",
+        tenant_id=tenant.id,
+        role="admin",
+    )
+    try:
+        customer = await create_portal_customer(
+            access_token=service_token,
+            payload={
+                "name": body.company_name.strip(),
+                "status": "prospect",
+                "contact_name": body.full_name.strip(),
+                "contact_email": email,
+                "contact_phone": body.contact_phone,
+                "address_line1": body.address_line1,
+                "address_line2": body.address_line2,
+                "postal_code": body.postal_code,
+                "city": body.city,
+                "country": body.country,
+                "vat_id": body.vat_id,
+                "billing_same_as_address": True,
+            },
+        )
+    except CustomerClientError as exc:
+        code = exc.status_code or 503
+        if code == 409:
+            raise HTTPException(status_code=409, detail="company_name_exists") from exc
+        raise HTTPException(status_code=min(code, 503), detail=exc.detail) from exc
+
+    customer_id = str(customer.get("id") or "")
+    if not customer_id:
+        raise HTTPException(status_code=503, detail="customer_create_failed")
+
+    user = User(
+        tenant_id=tenant.id,
+        email=email,
+        full_name=body.full_name.strip(),
+        hashed_password=auth.hash_password(body.password),
+        role="customer",
+        customer_id=customer_id,
+        locale=settings.default_locale,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    token, session_id = _issue_token(user)
+    set_audit_session_id(session_id)
+    audit(
+        "user-create",
+        outcome="success",
+        category=["iam", "authentication"],
+        event_type=["user", "creation"],
+        message="customer registered",
+        **{
+            "user.id": user.id,
+            "user.email": user.email,
+            "user.name": user.full_name,
+            "user.roles": [user.role],
+            "organization.id": user.tenant_id,
+            "customer.id": customer_id,
+            "session.id": session_id,
+        },
+    )
+    return TokenResponse(access_token=token)
+
+
+@router.post("/auth/customer/login", response_model=TokenResponse)
+async def customer_login(
+    body: LoginRequest,
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    """Customer portal login — always local email/password (independent of staff AUTH_MODE)."""
+    user = await db.scalar(select(User).where(User.email == body.email.lower()))
+    if (
+        not user
+        or user.role != "customer"
+        or not auth.verify_password(body.password, user.hashed_password)
+    ):
+        audit(
+            "user-login",
+            outcome="failure",
+            category=["authentication"],
+            event_type=["start"],
+            message="customer login failed: invalid credentials",
+            **{"user.email": body.email.lower()},
+        )
+        raise HTTPException(status_code=401, detail="invalid_credentials")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="user_inactive")
+    if not user.customer_id:
+        raise HTTPException(status_code=403, detail="customer_not_linked")
+
+    session_id = str(uuid4())
+    set_audit_session_id(session_id)
+    audit(
+        "user-login",
+        outcome="success",
+        category=["authentication"],
+        event_type=["start"],
+        message="customer login succeeded",
+        **{
+            "user.id": user.id,
+            "user.email": user.email,
+            "user.name": user.full_name,
+            "user.roles": [user.role],
+            "organization.id": user.tenant_id,
+            "customer.id": user.customer_id,
+            "session.id": session_id,
+        },
+    )
+    token, _ = _issue_token(user, session_id=session_id)
+    return TokenResponse(access_token=token)
+
+
 @router.post("/auth/oidc/callback", response_model=TokenResponse)
 async def oidc_callback(
     body: OidcCallbackRequest, db: AsyncSession = Depends(get_db)
@@ -253,6 +399,8 @@ async def oidc_callback(
         user = await db.scalar(select(User).where(User.oidc_sub == sub))
     if user is None:
         user = await db.scalar(select(User).where(User.email == email))
+    if user is not None and user.role == "customer":
+        raise HTTPException(status_code=403, detail="use_customer_login")
     created = False
     if user is None:
         tenant = await _ensure_tenant(db)
@@ -338,6 +486,7 @@ async def me(user: User = Depends(current_user)) -> UserResponse:
         role=user.role,
         locale=user.locale,
         tenant_id=user.tenant_id,
+        customer_id=user.customer_id,
     )
 
 
@@ -347,10 +496,12 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
 ) -> list[UserListItem]:
     """Tenant directory for managers (resolve partner names in finance / admin)."""
-    if user.role not in {"partner", "manager", "admin"}:
+    if user.role not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="not_manager")
     rows = await db.scalars(
-        select(User).where(User.tenant_id == user.tenant_id).order_by(User.full_name)
+        select(User)
+        .where(User.tenant_id == user.tenant_id, User.role.in_(STAFF_ROLES))
+        .order_by(User.full_name)
     )
     return [
         UserListItem(

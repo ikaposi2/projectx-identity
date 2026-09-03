@@ -33,7 +33,14 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str | None = None
     brand_display_name: str = "Platform"
     default_locale: str = "nl"
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "http://localhost:5174,http://127.0.0.1:5174"
+    )
+    customer_service_url: str = Field(
+        default="http://localhost:8005",
+        validation_alias="CUSTOMER_SERVICE_URL",
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property

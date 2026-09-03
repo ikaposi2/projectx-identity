@@ -13,6 +13,20 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class CustomerRegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8)
+    full_name: str = Field(min_length=1, max_length=200)
+    company_name: str = Field(min_length=1, max_length=200)
+    contact_phone: str | None = Field(default=None, max_length=40)
+    address_line1: str | None = Field(default=None, max_length=200)
+    address_line2: str | None = Field(default=None, max_length=200)
+    postal_code: str | None = Field(default=None, max_length=32)
+    city: str | None = Field(default=None, max_length=120)
+    country: str | None = Field(default=None, max_length=120)
+    vat_id: str | None = Field(default=None, max_length=64)
+
+
 class OidcCallbackRequest(BaseModel):
     code: str = Field(min_length=1)
     code_verifier: str = Field(min_length=43, max_length=128)
@@ -36,6 +50,7 @@ class UserResponse(BaseModel):
     role: str
     locale: str
     tenant_id: str
+    customer_id: str | None = None
 
 
 class UserListItem(BaseModel):

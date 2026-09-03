@@ -20,6 +20,12 @@ async def init_db() -> None:
         await conn.execute(
             text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_oidc_sub ON users (oidc_sub)")
         )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS customer_id VARCHAR(36)")
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_users_customer_id ON users (customer_id)")
+        )
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
